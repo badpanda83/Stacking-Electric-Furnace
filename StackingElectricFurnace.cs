@@ -2,144 +2,93 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StackingElectricFurnace", "badpanda83", "0.3.0")]
-    [Description("Allows players with permission to stack electric furnaces by right clicking while placing.")]
+    [Info("StackingElectricFurnace", "badpanda83", "0.4.0")]
+    [Description("Allows players with permission to stack electric furnaces by right clicking an existing electric furnace.")]
     public class StackingElectricFurnace : RustPlugin
     {
         private const string ElectricFurnacePrefab = "assets/prefabs/deployable/playerioents/electricfurnace/electricfurnace.deployed.prefab";
         private const string ElectricFurnaceShortPrefab = "electricfurnace.deployed";
+        private const string ElectricFurnaceItemShortName = "electric.furnace";
         private const string UsePermission = "stackingelectricfurnace.use";
-        private const float VerticalTolerance = 0.35f;
-        private const float HorizontalTolerance = 0.75f;
-        private const float MaxPlaceDistance = 6f;
+        private const float MaxUseDistance = 6f;
+        private const float VerticalGap = 0.02f;
+        private const string DeniedMessage = "You don't have permission to stack electric furnaces.";
+        private const string NoItemMessage = "You need an electric furnace in your inventory to stack one.";
+        private const string TooFarMessage = "You are too far away from that electric furnace.";
+        private const string BlockedMessage = "There is not enough room to stack another electric furnace there.";
 
         private void Init()
         {
             permission.RegisterPermission(UsePermission, this);
         }
 
-        private object CanAffordToPlace(BasePlayer player, Planner planner, Construction construction, Construction.Target target)
+        private void OnPlayerInput(BasePlayer player, InputState input)
         {
-            if (!CanUseStacking(player, planner, construction))
+            if (player == null || input == null || !input.WasJustPressed(BUTTON.FIRE_SECONDARY))
             {
-                return null;
+                return;
             }
 
-            BaseEntity supportEntity = target.entity;
-            if (supportEntity == null || !IsElectricFurnace(supportEntity))
+            if (!permission.UserHasPermission(player.UserIDString, UsePermission))
             {
-                return null;
+                SendReply(player, DeniedMessage);
+                return;
             }
 
-            Bounds supportBounds = GetWorldBounds(supportEntity);
-            if (!IsStackPlacement(target.position, supportEntity, supportBounds))
-            {
-                return null;
-            }
+            Item furnaceItem = player.inventory?.containerMain?.FindItemByItemName(ElectricFurnaceItemShortName)
+                ?? player.inventory?.containerBelt?.FindItemByItemName(ElectricFurnaceItemShortName)
+                ?? player.inventory?.containerWear?.FindItemByItemName(ElectricFurnaceItemShortName);
 
-            return true;
-        }
-
-        private object CanPlaceEntity(BasePlayer player, Planner planner, GameObject gameObject)
-        {
-            if (player == null || planner == null || gameObject == null)
+            if (furnaceItem == null)
             {
-                return null;
-            }
-
-            if (!HasStackPermission(player) || !IsElectricFurnace(gameObject) || !IsRightClickOnly(player))
-            {
-                return null;
+                SendReply(player, NoItemMessage);
+                return;
             }
 
             RaycastHit hit;
-            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, MaxPlaceDistance))
-            {
-                return null;
-            }
-
-            BaseEntity supportEntity = hit.GetEntity();
-            if (supportEntity == null || !IsElectricFurnace(supportEntity))
-            {
-                return null;
-            }
-
-            Bounds supportBounds = GetWorldBounds(supportEntity);
-            if (!IsStackPlacement(hit.point, supportEntity, supportBounds))
-            {
-                return null;
-            }
-
-            NextTick(() => TrySnapToTop(gameObject, supportEntity, supportBounds));
-            return true;
-        }
-
-        private bool CanUseStacking(BasePlayer player, Planner planner, Construction construction)
-        {
-            if (player == null || planner == null || construction == null)
-            {
-                return false;
-            }
-
-            return HasStackPermission(player)
-                && IsElectricFurnace(construction)
-                && IsRightClickOnly(player);
-        }
-
-        private bool HasStackPermission(BasePlayer player)
-        {
-            return player != null && permission.UserHasPermission(player.UserIDString, UsePermission);
-        }
-
-        private bool IsRightClickOnly(BasePlayer player)
-        {
-            if (player?.serverInput == null)
-            {
-                return false;
-            }
-
-            bool rightClick = player.serverInput.IsDown(BUTTON.FIRE_SECONDARY);
-            bool leftClick = player.serverInput.IsDown(BUTTON.FIRE_PRIMARY);
-            return rightClick && !leftClick;
-        }
-
-        private bool IsStackPlacement(Vector3 desiredPosition, BaseEntity supportEntity, Bounds supportBounds)
-        {
-            bool isAboveSupport = desiredPosition.y >= supportBounds.max.y - VerticalTolerance;
-            bool isCentered = Mathf.Abs(desiredPosition.x - supportEntity.transform.position.x) <= HorizontalTolerance
-                && Mathf.Abs(desiredPosition.z - supportEntity.transform.position.z) <= HorizontalTolerance;
-
-            return isAboveSupport && isCentered;
-        }
-
-        private void TrySnapToTop(GameObject gameObject, BaseEntity supportEntity, Bounds supportBounds)
-        {
-            if (gameObject == null || supportEntity == null)
+            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, MaxUseDistance))
             {
                 return;
             }
 
-            Collider newCollider = gameObject.GetComponentInChildren<Collider>();
-            if (newCollider == null)
+            BaseEntity targetEntity = hit.GetEntity();
+            if (targetEntity == null || !IsElectricFurnace(targetEntity))
             {
                 return;
             }
 
-            float newHalfHeight = newCollider.bounds.extents.y;
-            gameObject.transform.position = new Vector3(
-                supportEntity.transform.position.x,
-                supportBounds.max.y + newHalfHeight,
-                supportEntity.transform.position.z
+            if (Vector3.Distance(player.transform.position, targetEntity.transform.position) > MaxUseDistance + 1f)
+            {
+                SendReply(player, TooFarMessage);
+                return;
+            }
+
+            Bounds supportBounds = GetWorldBounds(targetEntity);
+            Vector3 spawnPosition = new Vector3(
+                targetEntity.transform.position.x,
+                supportBounds.max.y + GetElectricFurnaceHalfHeight() + VerticalGap,
+                targetEntity.transform.position.z
             );
-            gameObject.transform.rotation = Quaternion.identity;
-        }
 
-        private bool IsElectricFurnace(Construction construction)
-        {
-            string prefab = construction?.fullName;
-            return !string.IsNullOrEmpty(prefab)
-                && (prefab.IndexOf(ElectricFurnaceShortPrefab, System.StringComparison.OrdinalIgnoreCase) >= 0
-                    || prefab.Equals(ElectricFurnacePrefab, System.StringComparison.OrdinalIgnoreCase));
+            Quaternion spawnRotation = targetEntity.transform.rotation;
+
+            if (Physics.CheckBox(spawnPosition, GetElectricFurnaceExtents(), spawnRotation, ~0, QueryTriggerInteraction.Ignore))
+            {
+                SendReply(player, BlockedMessage);
+                return;
+            }
+
+            BaseEntity newFurnace = GameManager.server.CreateEntity(ElectricFurnacePrefab, spawnPosition, spawnRotation, true);
+            if (newFurnace == null)
+            {
+                return;
+            }
+
+            newFurnace.OwnerID = player.userID;
+            newFurnace.skinID = furnaceItem.skin;
+            newFurnace.Spawn();
+
+            furnaceItem.UseItem(1);
         }
 
         private bool IsElectricFurnace(BaseEntity entity)
@@ -149,17 +98,20 @@ namespace Oxide.Plugins
                 && prefab.IndexOf(ElectricFurnaceShortPrefab, System.StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private bool IsElectricFurnace(GameObject gameObject)
-        {
-            string name = gameObject?.name;
-            return !string.IsNullOrEmpty(name)
-                && name.IndexOf(ElectricFurnaceShortPrefab, System.StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
         private Bounds GetWorldBounds(BaseEntity entity)
         {
             Collider collider = entity.GetComponentInChildren<Collider>();
             return collider != null ? collider.bounds : new Bounds(entity.transform.position, Vector3.zero);
+        }
+
+        private Vector3 GetElectricFurnaceExtents()
+        {
+            return new Vector3(0.55f, 0.7f, 0.55f);
+        }
+
+        private float GetElectricFurnaceHalfHeight()
+        {
+            return GetElectricFurnaceExtents().y;
         }
     }
 }
