@@ -1,25 +1,28 @@
-using Oxide.Core.Plugins;
+using Oxide.Core;
+using Oxide.Core.Libraries.Covalence;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StackingElectricFurnace", "badpanda83", "0.1.0")]
-    [Description("Allows electric furnaces to be stacked vertically by relaxing placement checks when aiming at another electric furnace.")]
+    [Info("StackingElectricFurnace", "badpanda83", "0.2.0")]
+    [Description("Allows players with permission to stack electric furnaces by holding right click while placing.")]
     public class StackingElectricFurnace : RustPlugin
     {
         private const string ElectricFurnacePrefab = "assets/prefabs/deployable/playerioents/electricfurnace/electricfurnace.deployed.prefab";
         private const string ElectricFurnaceShortPrefab = "electricfurnace.deployed";
+        private const string UsePermission = "stackingelectricfurnace.use";
         private const float VerticalTolerance = 0.15f;
         private const float HorizontalTolerance = 0.2f;
+        private const float MaxPlaceDistance = 6f;
+
+        private void Init()
+        {
+            permission.RegisterPermission(UsePermission, this);
+        }
 
         private object CanAffordToPlace(BasePlayer player, Planner planner, Construction construction, Construction.Target target)
         {
-            if (player == null || planner == null || construction == null)
-            {
-                return null;
-            }
-
-            if (!IsElectricFurnace(construction))
+            if (!CanUseStacking(player, planner, construction))
             {
                 return null;
             }
@@ -32,12 +35,7 @@ namespace Oxide.Plugins
 
             Vector3 desiredPosition = target.position;
             Bounds supportBounds = GetWorldBounds(supportEntity);
-            float topY = supportBounds.max.y;
-            bool isAboveSupport = desiredPosition.y >= topY - VerticalTolerance;
-            bool isCentered = Mathf.Abs(desiredPosition.x - supportEntity.transform.position.x) <= HorizontalTolerance
-                && Mathf.Abs(desiredPosition.z - supportEntity.transform.position.z) <= HorizontalTolerance;
-
-            if (!isAboveSupport || !isCentered)
+            if (!IsStackPlacement(desiredPosition, supportEntity, supportBounds))
             {
                 return null;
             }
@@ -52,35 +50,65 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!IsElectricFurnace(gameObject))
+            if (!HasStackPermission(player) || !IsElectricFurnace(gameObject) || !IsRightClickHeld(player))
             {
                 return null;
             }
 
             RaycastHit hit;
-            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, 6f))
+            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, MaxPlaceDistance))
             {
                 return null;
             }
 
-            BaseEntity hitEntity = hit.GetEntity();
-            if (hitEntity == null || !IsElectricFurnace(hitEntity))
+            BaseEntity supportEntity = hit.GetEntity();
+            if (supportEntity == null || !IsElectricFurnace(supportEntity))
             {
                 return null;
             }
 
-            Bounds supportBounds = GetWorldBounds(hitEntity);
-            bool isAboveSupport = hit.point.y >= supportBounds.max.y - VerticalTolerance;
-            bool isCentered = Mathf.Abs(hit.point.x - hitEntity.transform.position.x) <= HorizontalTolerance
-                && Mathf.Abs(hit.point.z - hitEntity.transform.position.z) <= HorizontalTolerance;
-
-            if (!isAboveSupport || !isCentered)
+            Bounds supportBounds = GetWorldBounds(supportEntity);
+            if (!IsStackPlacement(hit.point, supportEntity, supportBounds))
             {
                 return null;
             }
 
-            NextTick(() => TrySnapToTop(player, gameObject, hitEntity, supportBounds));
+            NextTick(() => TrySnapToTop(player, gameObject, supportEntity, supportBounds));
             return true;
+        }
+
+        private bool CanUseStacking(BasePlayer player, Planner planner, Construction construction)
+        {
+            if (player == null || planner == null || construction == null)
+            {
+                return false;
+            }
+
+            if (!HasStackPermission(player) || !IsElectricFurnace(construction) || !IsRightClickHeld(player))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool HasStackPermission(BasePlayer player)
+        {
+            return player != null && permission.UserHasPermission(player.UserIDString, UsePermission);
+        }
+
+        private bool IsRightClickHeld(BasePlayer player)
+        {
+            return player != null && player.serverInput != null && player.serverInput.IsDown(BUTTON.FIRE_SECONDARY);
+        }
+
+        private bool IsStackPlacement(Vector3 desiredPosition, BaseEntity supportEntity, Bounds supportBounds)
+        {
+            bool isAboveSupport = desiredPosition.y >= supportBounds.max.y - VerticalTolerance;
+            bool isCentered = Mathf.Abs(desiredPosition.x - supportEntity.transform.position.x) <= HorizontalTolerance
+                && Mathf.Abs(desiredPosition.z - supportEntity.transform.position.z) <= HorizontalTolerance;
+
+            return isAboveSupport && isCentered;
         }
 
         private void TrySnapToTop(BasePlayer player, GameObject gameObject, BaseEntity supportEntity, Bounds supportBounds)
@@ -97,7 +125,6 @@ namespace Oxide.Plugins
             }
 
             Bounds newBounds = newCollider.bounds;
-            Vector3 currentPosition = gameObject.transform.position;
             float newHalfHeight = newBounds.extents.y;
 
             Vector3 snappedPosition = new Vector3(
