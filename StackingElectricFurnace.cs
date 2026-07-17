@@ -1,18 +1,16 @@
-using Oxide.Core;
-using Oxide.Core.Libraries.Covalence;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StackingElectricFurnace", "badpanda83", "0.2.0")]
-    [Description("Allows players with permission to stack electric furnaces by holding right click while placing.")]
+    [Info("StackingElectricFurnace", "badpanda83", "0.3.0")]
+    [Description("Allows players with permission to stack electric furnaces by right clicking while placing.")]
     public class StackingElectricFurnace : RustPlugin
     {
         private const string ElectricFurnacePrefab = "assets/prefabs/deployable/playerioents/electricfurnace/electricfurnace.deployed.prefab";
         private const string ElectricFurnaceShortPrefab = "electricfurnace.deployed";
         private const string UsePermission = "stackingelectricfurnace.use";
-        private const float VerticalTolerance = 0.15f;
-        private const float HorizontalTolerance = 0.2f;
+        private const float VerticalTolerance = 0.35f;
+        private const float HorizontalTolerance = 0.75f;
         private const float MaxPlaceDistance = 6f;
 
         private void Init()
@@ -33,9 +31,8 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            Vector3 desiredPosition = target.position;
             Bounds supportBounds = GetWorldBounds(supportEntity);
-            if (!IsStackPlacement(desiredPosition, supportEntity, supportBounds))
+            if (!IsStackPlacement(target.position, supportEntity, supportBounds))
             {
                 return null;
             }
@@ -50,7 +47,7 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!HasStackPermission(player) || !IsElectricFurnace(gameObject) || !IsRightClickHeld(player))
+            if (!HasStackPermission(player) || !IsElectricFurnace(gameObject) || !IsRightClickOnly(player))
             {
                 return null;
             }
@@ -73,7 +70,7 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            NextTick(() => TrySnapToTop(player, gameObject, supportEntity, supportBounds));
+            NextTick(() => TrySnapToTop(gameObject, supportEntity, supportBounds));
             return true;
         }
 
@@ -84,12 +81,9 @@ namespace Oxide.Plugins
                 return false;
             }
 
-            if (!HasStackPermission(player) || !IsElectricFurnace(construction) || !IsRightClickHeld(player))
-            {
-                return false;
-            }
-
-            return true;
+            return HasStackPermission(player)
+                && IsElectricFurnace(construction)
+                && IsRightClickOnly(player);
         }
 
         private bool HasStackPermission(BasePlayer player)
@@ -97,9 +91,16 @@ namespace Oxide.Plugins
             return player != null && permission.UserHasPermission(player.UserIDString, UsePermission);
         }
 
-        private bool IsRightClickHeld(BasePlayer player)
+        private bool IsRightClickOnly(BasePlayer player)
         {
-            return player != null && player.serverInput != null && player.serverInput.IsDown(BUTTON.FIRE_SECONDARY);
+            if (player?.serverInput == null)
+            {
+                return false;
+            }
+
+            bool rightClick = player.serverInput.IsDown(BUTTON.FIRE_SECONDARY);
+            bool leftClick = player.serverInput.IsDown(BUTTON.FIRE_PRIMARY);
+            return rightClick && !leftClick;
         }
 
         private bool IsStackPlacement(Vector3 desiredPosition, BaseEntity supportEntity, Bounds supportBounds)
@@ -111,9 +112,9 @@ namespace Oxide.Plugins
             return isAboveSupport && isCentered;
         }
 
-        private void TrySnapToTop(BasePlayer player, GameObject gameObject, BaseEntity supportEntity, Bounds supportBounds)
+        private void TrySnapToTop(GameObject gameObject, BaseEntity supportEntity, Bounds supportBounds)
         {
-            if (player == null || gameObject == null || supportEntity == null)
+            if (gameObject == null || supportEntity == null)
             {
                 return;
             }
@@ -124,16 +125,12 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Bounds newBounds = newCollider.bounds;
-            float newHalfHeight = newBounds.extents.y;
-
-            Vector3 snappedPosition = new Vector3(
+            float newHalfHeight = newCollider.bounds.extents.y;
+            gameObject.transform.position = new Vector3(
                 supportEntity.transform.position.x,
                 supportBounds.max.y + newHalfHeight,
                 supportEntity.transform.position.z
             );
-
-            gameObject.transform.position = snappedPosition;
             gameObject.transform.rotation = Quaternion.identity;
         }
 
