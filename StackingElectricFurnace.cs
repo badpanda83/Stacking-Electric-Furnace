@@ -1,9 +1,12 @@
+using System.Collections.Generic;
+using Newtonsoft.Json;
+using Oxide.Core;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StackingElectricFurnace", "badpanda83", "0.7.0")]
-    [Description("Allows players with permission to stack electric and industrial electric furnaces by right clicking an existing furnace with the desired furnace selected.")]
+    [Info("StackingElectricFurnace", "badpanda83", "1.2.1")]
+    [Description("Allows players with permission to stack electric furnaces and industrial electric furnaces up to two total.")]
     public class StackingElectricFurnace : RustPlugin
     {
         private const string ElectricFurnacePrefab = "assets/prefabs/deployable/playerioents/electricfurnace/electricfurnace.deployed.prefab";
@@ -16,17 +19,106 @@ namespace Oxide.Plugins
         private const string IndustrialElectricFurnaceItemShortName = "industrial.electric.furnace";
 
         private const string UsePermission = "stackingelectricfurnace.use";
-        private const float MaxUseDistance = 6f;
-        private const float VerticalGap = 0.0f;
+        private const BaseEntity.Flags StackedFlag = BaseEntity.Flags.Reserved1;
+        private const string DataFileName = "StackingElectricFurnace";
 
-        private const string DeniedMessage = "You don't have permission to stack furnaces.";
-        private const string WrongItemMessage = "Hold an electric furnace or industrial electric furnace to stack it.";
-        private const string TooFarMessage = "You are too far away from that furnace.";
-        private const string FailedMessage = "Failed to stack the furnace there.";
+        private readonly HashSet<ulong> _runtimeStackedEntityIds = new HashSet<ulong>();
+        private readonly Dictionary<ulong, ulong> _topToBottom = new Dictionary<ulong, ulong>();
+        private readonly Dictionary<ulong, ulong> _bottomToTop = new Dictionary<ulong, ulong>();
+
+        private Configuration _config;
+        private StoredData _data;
+
+        private class Configuration
+        {
+            [JsonProperty("Building privilege required")]
+            public bool BuildingPrivilegeRequired = false;
+
+            [JsonProperty("Max use distance")]
+            public float MaxUseDistance = 6f;
+
+            [JsonProperty("Horizontal tolerance")]
+            public float HorizontalTolerance = 0.15f;
+
+            [JsonProperty("Max vertical support distance")]
+            public float MaxVerticalSupportDistance = 2.0f;
+        }
+
+        private class StoredData
+        {
+            [JsonProperty("Stack pairs")]
+            public List<StackPair> StackPairs = new List<StackPair>();
+        }
+
+        private class StackPair
+        {
+            [JsonProperty("Top entity ID")]
+            public ulong TopEntityId;
+
+            [JsonProperty("Bottom entity ID")]
+            public ulong BottomEntityId;
+        }
+
+        protected override void LoadDefaultConfig()
+        {
+            _config = new Configuration();
+            SaveConfig();
+        }
+
+        protected override void LoadConfig()
+        {
+            base.LoadConfig();
+            _config = Config.ReadObject<Configuration>() ?? new Configuration();
+            SaveConfig();
+        }
+
+        protected override void SaveConfig()
+        {
+            Config.WriteObject(_config, true);
+        }
 
         private void Init()
         {
             permission.RegisterPermission(UsePermission, this);
+            LoadData();
+        }
+
+        private void OnServerInitialized()
+        {
+            RebuildMappingsFromData();
+        }
+
+        private void Unload()
+        {
+            foreach (ulong entityId in _runtimeStackedEntityIds)
+            {
+                BaseEntity entity = FindEntity(entityId);
+                if (entity == null || entity.IsDestroyed)
+                {
+                    continue;
+                }
+
+                entity.SetFlag(StackedFlag, false);
+                entity.SendNetworkUpdateImmediate();
+            }
+
+            SaveData();
+            _runtimeStackedEntityIds.Clear();
+            _topToBottom.Clear();
+            _bottomToTop.Clear();
+        }
+
+        protected override void LoadDefaultMessages()
+        {
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                ["NoPermission"] = "You don't have permission to stack furnaces.",
+                ["BuildingBlocked"] = "You must be building authorized to stack furnaces.",
+                ["WrongItem"] = "Hold an electric furnace or industrial electric furnace to stack it.",
+                ["TooFar"] = "You are too far away from that furnace.",
+                ["MaxStack"] = "You can only stack furnaces two high.",
+                ["Failed"] = "Failed to stack the furnace there."
+            }, this);
         }
 
         private void OnPlayerInput(BasePlayer player, InputState input)
@@ -36,23 +128,8 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (!permission.UserHasPermission(player.UserIDString, UsePermission))
-            {
-                SendReply(player, DeniedMessage);
-                return;
-            }
-
-            HeldEntity heldEntity = player.GetHeldEntity();
-            Item heldItem = heldEntity?.GetItem();
-            FurnaceDefinition selectedFurnace = GetFurnaceDefinition(heldItem?.info?.shortname);
-            if (selectedFurnace == null)
-            {
-                SendReply(player, WrongItemMessage);
-                return;
-            }
-
             RaycastHit hit;
-            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, MaxUseDistance))
+            if (!Physics.Raycast(player.eyes.HeadRay(), out hit, _config.MaxUseDistance))
             {
                 return;
             }
@@ -63,52 +140,261 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (Vector3.Distance(player.transform.position, targetEntity.transform.position) > MaxUseDistance + 1f)
+            if (!permission.UserHasPermission(player.UserIDString, UsePermission))
             {
-                SendReply(player, TooFarMessage);
+                ReplyToPlayer(player, "NoPermission");
                 return;
             }
 
-            Bounds supportBounds = GetWorldBounds(targetEntity);
+            if (_config.BuildingPrivilegeRequired && !player.IsBuildingAuthed())
+            {
+                ReplyToPlayer(player, "BuildingBlocked");
+                return;
+            }
+
+            Item activeItem = player.GetActiveItem();
+            FurnaceDefinition selectedFurnace = GetFurnaceDefinition(activeItem?.info?.shortname);
+            if (selectedFurnace == null)
+            {
+                ReplyToPlayer(player, "WrongItem");
+                return;
+            }
+
+            if (Vector3.Distance(player.transform.position, targetEntity.transform.position) > _config.MaxUseDistance + 1f)
+            {
+                ReplyToPlayer(player, "TooFar");
+                return;
+            }
+
+            if (targetEntity.net == null)
+            {
+                ReplyToPlayer(player, "Failed");
+                return;
+            }
+
+            ulong bottomId = targetEntity.net.ID.Value;
+
+            if (targetEntity.HasFlag(StackedFlag) || _bottomToTop.ContainsKey(bottomId))
+            {
+                ReplyToPlayer(player, "MaxStack");
+                return;
+            }
+
+            Bounds targetBounds = GetWorldBounds(targetEntity);
             Vector3 spawnPosition = new Vector3(
                 targetEntity.transform.position.x,
-                supportBounds.max.y + selectedFurnace.HeightOffset + VerticalGap,
+                targetBounds.max.y,
                 targetEntity.transform.position.z
             );
 
             Quaternion spawnRotation = targetEntity.transform.rotation;
 
-            Puts($"Attempting stack spawn for {selectedFurnace.ItemShortName} at {spawnPosition} on top of {targetEntity.PrefabName} for player {player.displayName}");
-
             BaseEntity newFurnace = GameManager.server.CreateEntity(selectedFurnace.PrefabPath, spawnPosition, spawnRotation, true);
             if (newFurnace == null)
             {
-                SendReply(player, FailedMessage);
-                Puts($"CreateEntity returned null while stacking {selectedFurnace.ItemShortName} using prefab {selectedFurnace.PrefabPath}");
+                ReplyToPlayer(player, "Failed");
                 return;
             }
 
             newFurnace.OwnerID = player.userID;
-            if (heldItem != null)
-            {
-                newFurnace.skinID = heldItem.skin;
-            }
-
+            newFurnace.skinID = activeItem.skin;
+            newFurnace.SetFlag(StackedFlag, true);
             newFurnace.Spawn();
 
-            if (newFurnace.IsDestroyed)
+            if (newFurnace.IsDestroyed || newFurnace.net == null)
             {
-                SendReply(player, FailedMessage);
-                Puts($"Spawned {selectedFurnace.ItemShortName} was immediately destroyed after spawn.");
+                ReplyToPlayer(player, "Failed");
                 return;
             }
 
-            CopyGrounding(targetEntity, newFurnace);
-            UpdateBuildingPrivilege(targetEntity, newFurnace);
-            newFurnace.SendNetworkUpdateImmediate();
+            ulong topId = newFurnace.net.ID.Value;
 
-            heldItem.UseItem(1);
-            Puts($"Successfully stacked {selectedFurnace.ItemShortName} for {player.displayName} at {spawnPosition}");
+            _runtimeStackedEntityIds.Add(topId);
+            _topToBottom[topId] = bottomId;
+            _bottomToTop[bottomId] = topId;
+            UpsertStackPair(topId, bottomId);
+            SaveData();
+
+            newFurnace.SendNetworkUpdateImmediate();
+            activeItem.UseItem(1);
+        }
+
+        private void OnEntityKill(BaseNetworkable networkable)
+        {
+            BaseEntity entity = networkable as BaseEntity;
+            if (entity == null || entity.net == null || !IsSupportedTargetFurnace(entity))
+            {
+                return;
+            }
+
+            ulong entityId = entity.net.ID.Value;
+
+            if (_topToBottom.TryGetValue(entityId, out ulong bottomId))
+            {
+                _topToBottom.Remove(entityId);
+                _bottomToTop.Remove(bottomId);
+                _runtimeStackedEntityIds.Remove(entityId);
+                RemoveStackPair(entityId, bottomId);
+                SaveData();
+                return;
+            }
+
+            if (_bottomToTop.TryGetValue(entityId, out ulong topId))
+            {
+                _bottomToTop.Remove(entityId);
+                _topToBottom.Remove(topId);
+                _runtimeStackedEntityIds.Remove(topId);
+                RemoveStackPair(topId, entityId);
+                SaveData();
+
+                BaseEntity topEntity = FindEntity(topId);
+                if (topEntity != null && !topEntity.IsDestroyed)
+                {
+                    topEntity.Kill();
+                }
+            }
+        }
+
+        private object OnEntityGroundMissing(BaseEntity entity)
+        {
+            if (entity == null || entity.net == null || !IsSupportedTargetFurnace(entity) || !entity.HasFlag(StackedFlag))
+            {
+                return null;
+            }
+
+            ulong topId = entity.net.ID.Value;
+            if (!_topToBottom.TryGetValue(topId, out ulong bottomId))
+            {
+                entity.Kill();
+                return true;
+            }
+
+            BaseEntity bottomEntity = FindEntity(bottomId);
+            if (bottomEntity == null || bottomEntity.IsDestroyed || !IsSupportedTargetFurnace(bottomEntity))
+            {
+                entity.Kill();
+                return true;
+            }
+
+            if (IsSupportedByTrackedBottom(entity, bottomEntity))
+            {
+                return true;
+            }
+
+            entity.Kill();
+            return true;
+        }
+
+        private bool IsSupportedByTrackedBottom(BaseEntity topEntity, BaseEntity bottomEntity)
+        {
+            Vector3 topPos = topEntity.transform.position;
+            Vector3 bottomPos = bottomEntity.transform.position;
+
+            Vector2 topXZ = new Vector2(topPos.x, topPos.z);
+            Vector2 bottomXZ = new Vector2(bottomPos.x, bottomPos.z);
+
+            if (Vector2.Distance(topXZ, bottomXZ) > _config.HorizontalTolerance)
+            {
+                return false;
+            }
+
+            float verticalDifference = topPos.y - bottomPos.y;
+            return verticalDifference > 0f && verticalDifference <= _config.MaxVerticalSupportDistance;
+        }
+
+        private void RebuildMappingsFromData()
+        {
+            _runtimeStackedEntityIds.Clear();
+            _topToBottom.Clear();
+            _bottomToTop.Clear();
+
+            if (_data == null || _data.StackPairs == null)
+            {
+                _data = new StoredData();
+                return;
+            }
+
+            List<StackPair> validPairs = new List<StackPair>();
+
+            for (int i = 0; i < _data.StackPairs.Count; i++)
+            {
+                StackPair pair = _data.StackPairs[i];
+                BaseEntity topEntity = FindEntity(pair.TopEntityId);
+                BaseEntity bottomEntity = FindEntity(pair.BottomEntityId);
+
+                if (topEntity == null || topEntity.IsDestroyed || !IsSupportedTargetFurnace(topEntity))
+                {
+                    continue;
+                }
+
+                if (bottomEntity == null || bottomEntity.IsDestroyed || !IsSupportedTargetFurnace(bottomEntity))
+                {
+                    topEntity.SetFlag(StackedFlag, false);
+                    topEntity.SendNetworkUpdateImmediate();
+                    continue;
+                }
+
+                topEntity.SetFlag(StackedFlag, true);
+                topEntity.SendNetworkUpdateImmediate();
+
+                _runtimeStackedEntityIds.Add(pair.TopEntityId);
+                _topToBottom[pair.TopEntityId] = pair.BottomEntityId;
+                _bottomToTop[pair.BottomEntityId] = pair.TopEntityId;
+                validPairs.Add(pair);
+            }
+
+            _data.StackPairs = validPairs;
+            SaveData();
+        }
+
+        private void UpsertStackPair(ulong topId, ulong bottomId)
+        {
+            if (_data == null)
+            {
+                _data = new StoredData();
+            }
+
+            for (int i = 0; i < _data.StackPairs.Count; i++)
+            {
+                StackPair pair = _data.StackPairs[i];
+                if (pair.TopEntityId == topId || pair.BottomEntityId == bottomId)
+                {
+                    pair.TopEntityId = topId;
+                    pair.BottomEntityId = bottomId;
+                    return;
+                }
+            }
+
+            _data.StackPairs.Add(new StackPair
+            {
+                TopEntityId = topId,
+                BottomEntityId = bottomId
+            });
+        }
+
+        private void RemoveStackPair(ulong topId, ulong bottomId)
+        {
+            if (_data == null || _data.StackPairs == null)
+            {
+                return;
+            }
+
+            _data.StackPairs.RemoveAll(pair => pair.TopEntityId == topId || pair.BottomEntityId == bottomId);
+        }
+
+        private void LoadData()
+        {
+            _data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(DataFileName) ?? new StoredData();
+        }
+
+        private void SaveData()
+        {
+            Interface.Oxide.DataFileSystem.WriteObject(DataFileName, _data);
+        }
+
+        private BaseEntity FindEntity(ulong entityId)
+        {
+            return BaseNetworkable.serverEntities.Find(new NetworkableId(entityId)) as BaseEntity;
         }
 
         private FurnaceDefinition GetFurnaceDefinition(string itemShortName)
@@ -122,9 +408,7 @@ namespace Oxide.Plugins
             {
                 return new FurnaceDefinition
                 {
-                    PrefabPath = ElectricFurnacePrefab,
-                    ItemShortName = ElectricFurnaceItemShortName,
-                    HeightOffset = 0.0f
+                    PrefabPath = ElectricFurnacePrefab
                 };
             }
 
@@ -132,9 +416,7 @@ namespace Oxide.Plugins
             {
                 return new FurnaceDefinition
                 {
-                    PrefabPath = IndustrialElectricFurnacePrefab,
-                    ItemShortName = IndustrialElectricFurnaceItemShortName,
-                    HeightOffset = 0.0f
+                    PrefabPath = IndustrialElectricFurnacePrefab
                 };
             }
 
@@ -159,41 +441,14 @@ namespace Oxide.Plugins
             return collider != null ? collider.bounds : new Bounds(entity.transform.position, Vector3.zero);
         }
 
-        private void CopyGrounding(BaseEntity source, BaseEntity target)
+        private void ReplyToPlayer(BasePlayer player, string key)
         {
-            if (source == null || target == null)
-            {
-                return;
-            }
-
-            target.SetParent(source.GetParentEntity(), true, true);
-            target.groundEntity = source.groundEntity;
-            target.transform.hasChanged = true;
-        }
-
-        private void UpdateBuildingPrivilege(BaseEntity source, BaseEntity target)
-        {
-            if (source == null || target == null)
-            {
-                return;
-            }
-
-            BuildingManager.Building sourceBuilding = source.GetBuilding();
-            if (sourceBuilding != null)
-            {
-                target.AttachToBuilding(sourceBuilding);
-            }
-            else
-            {
-                target.UpdateNetworkGroup();
-            }
+            SendReply(player, lang.GetMessage(key, this, player.UserIDString));
         }
 
         private class FurnaceDefinition
         {
             public string PrefabPath;
-            public string ItemShortName;
-            public float HeightOffset;
         }
     }
 }
