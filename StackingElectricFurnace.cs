@@ -2,20 +2,27 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StackingElectricFurnace", "badpanda83", "0.4.0")]
-    [Description("Allows players with permission to stack electric furnaces by right clicking an existing electric furnace.")]
+    [Info("StackingElectricFurnace", "badpanda83", "0.7.0")]
+    [Description("Allows players with permission to stack electric and industrial electric furnaces by right clicking an existing furnace with the desired furnace selected.")]
     public class StackingElectricFurnace : RustPlugin
     {
         private const string ElectricFurnacePrefab = "assets/prefabs/deployable/playerioents/electricfurnace/electricfurnace.deployed.prefab";
+        private const string IndustrialElectricFurnacePrefab = "assets/prefabs/deployable/playerioents/electricfurnace/skins/industrial_electric_furnace/industrial_electric_furnace.deployed.prefab";
+
         private const string ElectricFurnaceShortPrefab = "electricfurnace.deployed";
+        private const string IndustrialElectricFurnaceShortPrefab = "industrial_electric_furnace.deployed";
+
         private const string ElectricFurnaceItemShortName = "electric.furnace";
+        private const string IndustrialElectricFurnaceItemShortName = "industrial.electric.furnace";
+
         private const string UsePermission = "stackingelectricfurnace.use";
         private const float MaxUseDistance = 6f;
-        private const float VerticalGap = 0.02f;
-        private const string DeniedMessage = "You don't have permission to stack electric furnaces.";
-        private const string NoItemMessage = "You need an electric furnace in your inventory to stack one.";
-        private const string TooFarMessage = "You are too far away from that electric furnace.";
-        private const string BlockedMessage = "There is not enough room to stack another electric furnace there.";
+        private const float VerticalGap = 0.0f;
+
+        private const string DeniedMessage = "You don't have permission to stack furnaces.";
+        private const string WrongItemMessage = "Hold an electric furnace or industrial electric furnace to stack it.";
+        private const string TooFarMessage = "You are too far away from that furnace.";
+        private const string FailedMessage = "Failed to stack the furnace there.";
 
         private void Init()
         {
@@ -35,13 +42,12 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Item furnaceItem = player.inventory?.containerMain?.FindItemByItemName(ElectricFurnaceItemShortName)
-                ?? player.inventory?.containerBelt?.FindItemByItemName(ElectricFurnaceItemShortName)
-                ?? player.inventory?.containerWear?.FindItemByItemName(ElectricFurnaceItemShortName);
-
-            if (furnaceItem == null)
+            HeldEntity heldEntity = player.GetHeldEntity();
+            Item heldItem = heldEntity?.GetItem();
+            FurnaceDefinition selectedFurnace = GetFurnaceDefinition(heldItem?.info?.shortname);
+            if (selectedFurnace == null)
             {
-                SendReply(player, NoItemMessage);
+                SendReply(player, WrongItemMessage);
                 return;
             }
 
@@ -52,7 +58,7 @@ namespace Oxide.Plugins
             }
 
             BaseEntity targetEntity = hit.GetEntity();
-            if (targetEntity == null || !IsElectricFurnace(targetEntity))
+            if (targetEntity == null || !IsSupportedTargetFurnace(targetEntity))
             {
                 return;
             }
@@ -66,36 +72,85 @@ namespace Oxide.Plugins
             Bounds supportBounds = GetWorldBounds(targetEntity);
             Vector3 spawnPosition = new Vector3(
                 targetEntity.transform.position.x,
-                supportBounds.max.y + GetElectricFurnaceHalfHeight() + VerticalGap,
+                supportBounds.max.y + selectedFurnace.HeightOffset + VerticalGap,
                 targetEntity.transform.position.z
             );
 
             Quaternion spawnRotation = targetEntity.transform.rotation;
 
-            if (Physics.CheckBox(spawnPosition, GetElectricFurnaceExtents(), spawnRotation, ~0, QueryTriggerInteraction.Ignore))
-            {
-                SendReply(player, BlockedMessage);
-                return;
-            }
+            Puts($"Attempting stack spawn for {selectedFurnace.ItemShortName} at {spawnPosition} on top of {targetEntity.PrefabName} for player {player.displayName}");
 
-            BaseEntity newFurnace = GameManager.server.CreateEntity(ElectricFurnacePrefab, spawnPosition, spawnRotation, true);
+            BaseEntity newFurnace = GameManager.server.CreateEntity(selectedFurnace.PrefabPath, spawnPosition, spawnRotation, true);
             if (newFurnace == null)
             {
+                SendReply(player, FailedMessage);
+                Puts($"CreateEntity returned null while stacking {selectedFurnace.ItemShortName} using prefab {selectedFurnace.PrefabPath}");
                 return;
             }
 
             newFurnace.OwnerID = player.userID;
-            newFurnace.skinID = furnaceItem.skin;
+            if (heldItem != null)
+            {
+                newFurnace.skinID = heldItem.skin;
+            }
+
             newFurnace.Spawn();
 
-            furnaceItem.UseItem(1);
+            if (newFurnace.IsDestroyed)
+            {
+                SendReply(player, FailedMessage);
+                Puts($"Spawned {selectedFurnace.ItemShortName} was immediately destroyed after spawn.");
+                return;
+            }
+
+            CopyGrounding(targetEntity, newFurnace);
+            UpdateBuildingPrivilege(targetEntity, newFurnace);
+            newFurnace.SendNetworkUpdateImmediate();
+
+            heldItem.UseItem(1);
+            Puts($"Successfully stacked {selectedFurnace.ItemShortName} for {player.displayName} at {spawnPosition}");
         }
 
-        private bool IsElectricFurnace(BaseEntity entity)
+        private FurnaceDefinition GetFurnaceDefinition(string itemShortName)
+        {
+            if (string.IsNullOrEmpty(itemShortName))
+            {
+                return null;
+            }
+
+            if (string.Equals(itemShortName, ElectricFurnaceItemShortName, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return new FurnaceDefinition
+                {
+                    PrefabPath = ElectricFurnacePrefab,
+                    ItemShortName = ElectricFurnaceItemShortName,
+                    HeightOffset = 0.0f
+                };
+            }
+
+            if (string.Equals(itemShortName, IndustrialElectricFurnaceItemShortName, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return new FurnaceDefinition
+                {
+                    PrefabPath = IndustrialElectricFurnacePrefab,
+                    ItemShortName = IndustrialElectricFurnaceItemShortName,
+                    HeightOffset = 0.0f
+                };
+            }
+
+            return null;
+        }
+
+        private bool IsSupportedTargetFurnace(BaseEntity entity)
         {
             string prefab = entity?.PrefabName;
-            return !string.IsNullOrEmpty(prefab)
-                && prefab.IndexOf(ElectricFurnaceShortPrefab, System.StringComparison.OrdinalIgnoreCase) >= 0;
+            if (string.IsNullOrEmpty(prefab))
+            {
+                return false;
+            }
+
+            return prefab.IndexOf(ElectricFurnaceShortPrefab, System.StringComparison.OrdinalIgnoreCase) >= 0
+                || prefab.IndexOf(IndustrialElectricFurnaceShortPrefab, System.StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private Bounds GetWorldBounds(BaseEntity entity)
@@ -104,14 +159,41 @@ namespace Oxide.Plugins
             return collider != null ? collider.bounds : new Bounds(entity.transform.position, Vector3.zero);
         }
 
-        private Vector3 GetElectricFurnaceExtents()
+        private void CopyGrounding(BaseEntity source, BaseEntity target)
         {
-            return new Vector3(0.55f, 0.7f, 0.55f);
+            if (source == null || target == null)
+            {
+                return;
+            }
+
+            target.SetParent(source.GetParentEntity(), true, true);
+            target.groundEntity = source.groundEntity;
+            target.transform.hasChanged = true;
         }
 
-        private float GetElectricFurnaceHalfHeight()
+        private void UpdateBuildingPrivilege(BaseEntity source, BaseEntity target)
         {
-            return GetElectricFurnaceExtents().y;
+            if (source == null || target == null)
+            {
+                return;
+            }
+
+            BuildingManager.Building sourceBuilding = source.GetBuilding();
+            if (sourceBuilding != null)
+            {
+                target.AttachToBuilding(sourceBuilding);
+            }
+            else
+            {
+                target.UpdateNetworkGroup();
+            }
+        }
+
+        private class FurnaceDefinition
+        {
+            public string PrefabPath;
+            public string ItemShortName;
+            public float HeightOffset;
         }
     }
 }
