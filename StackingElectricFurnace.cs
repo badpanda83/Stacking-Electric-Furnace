@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StackingElectricFurnace", "badpanda83", "1.2.1")]
+    [Info("StackingElectricFurnace", "badpanda83", "1.2.2")]
     [Description("Allows players with permission to stack electric furnaces and industrial electric furnaces up to two total.")]
     public class StackingElectricFurnace : RustPlugin
     {
@@ -19,10 +19,8 @@ namespace Oxide.Plugins
         private const string IndustrialElectricFurnaceItemShortName = "industrial.electric.furnace";
 
         private const string UsePermission = "stackingelectricfurnace.use";
-        private const BaseEntity.Flags StackedFlag = BaseEntity.Flags.Reserved1;
         private const string DataFileName = "StackingElectricFurnace";
 
-        private readonly HashSet<ulong> _runtimeStackedEntityIds = new HashSet<ulong>();
         private readonly Dictionary<ulong, ulong> _topToBottom = new Dictionary<ulong, ulong>();
         private readonly Dictionary<ulong, ulong> _bottomToTop = new Dictionary<ulong, ulong>();
 
@@ -90,20 +88,7 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
-            foreach (ulong entityId in _runtimeStackedEntityIds)
-            {
-                BaseEntity entity = FindEntity(entityId);
-                if (entity == null || entity.IsDestroyed)
-                {
-                    continue;
-                }
-
-                entity.SetFlag(StackedFlag, false);
-                entity.SendNetworkUpdateImmediate();
-            }
-
             SaveData();
-            _runtimeStackedEntityIds.Clear();
             _topToBottom.Clear();
             _bottomToTop.Clear();
         }
@@ -174,7 +159,7 @@ namespace Oxide.Plugins
 
             ulong bottomId = targetEntity.net.ID.Value;
 
-            if (targetEntity.HasFlag(StackedFlag) || _bottomToTop.ContainsKey(bottomId))
+            if (_topToBottom.ContainsKey(bottomId) || _bottomToTop.ContainsKey(bottomId))
             {
                 ReplyToPlayer(player, "MaxStack");
                 return;
@@ -198,7 +183,6 @@ namespace Oxide.Plugins
 
             newFurnace.OwnerID = player.userID;
             newFurnace.skinID = activeItem.skin;
-            newFurnace.SetFlag(StackedFlag, true);
             newFurnace.Spawn();
 
             if (newFurnace.IsDestroyed || newFurnace.net == null)
@@ -209,7 +193,6 @@ namespace Oxide.Plugins
 
             ulong topId = newFurnace.net.ID.Value;
 
-            _runtimeStackedEntityIds.Add(topId);
             _topToBottom[topId] = bottomId;
             _bottomToTop[bottomId] = topId;
             UpsertStackPair(topId, bottomId);
@@ -233,7 +216,6 @@ namespace Oxide.Plugins
             {
                 _topToBottom.Remove(entityId);
                 _bottomToTop.Remove(bottomId);
-                _runtimeStackedEntityIds.Remove(entityId);
                 RemoveStackPair(entityId, bottomId);
                 SaveData();
                 return;
@@ -243,7 +225,6 @@ namespace Oxide.Plugins
             {
                 _bottomToTop.Remove(entityId);
                 _topToBottom.Remove(topId);
-                _runtimeStackedEntityIds.Remove(topId);
                 RemoveStackPair(topId, entityId);
                 SaveData();
 
@@ -257,7 +238,7 @@ namespace Oxide.Plugins
 
         private object OnEntityGroundMissing(BaseEntity entity)
         {
-            if (entity == null || entity.net == null || !IsSupportedTargetFurnace(entity) || !entity.HasFlag(StackedFlag))
+            if (entity == null || entity.net == null || !IsSupportedTargetFurnace(entity))
             {
                 return null;
             }
@@ -265,8 +246,7 @@ namespace Oxide.Plugins
             ulong topId = entity.net.ID.Value;
             if (!_topToBottom.TryGetValue(topId, out ulong bottomId))
             {
-                entity.Kill();
-                return true;
+                return null;
             }
 
             BaseEntity bottomEntity = FindEntity(bottomId);
@@ -304,7 +284,6 @@ namespace Oxide.Plugins
 
         private void RebuildMappingsFromData()
         {
-            _runtimeStackedEntityIds.Clear();
             _topToBottom.Clear();
             _bottomToTop.Clear();
 
@@ -329,15 +308,9 @@ namespace Oxide.Plugins
 
                 if (bottomEntity == null || bottomEntity.IsDestroyed || !IsSupportedTargetFurnace(bottomEntity))
                 {
-                    topEntity.SetFlag(StackedFlag, false);
-                    topEntity.SendNetworkUpdateImmediate();
                     continue;
                 }
 
-                topEntity.SetFlag(StackedFlag, true);
-                topEntity.SendNetworkUpdateImmediate();
-
-                _runtimeStackedEntityIds.Add(pair.TopEntityId);
                 _topToBottom[pair.TopEntityId] = pair.BottomEntityId;
                 _bottomToTop[pair.BottomEntityId] = pair.TopEntityId;
                 validPairs.Add(pair);

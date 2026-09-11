@@ -98,11 +98,11 @@ This stores tracked top/bottom stack pairs so stacked furnaces continue to behav
 - This plugin supports mixed stacking between electric and industrial electric furnaces
 - The plugin uses Rust's ground-missing handling to protect properly stacked top furnaces
 - Stack relationships are tracked exactly as top-to-bottom pairs to avoid nearby stacks interfering with each other
-- On unload, the plugin clears the runtime stacked marker flag from tracked furnaces loaded during that session
+- Stack relationships are identified by persisted entity pairs and do not depend on Rust entity flags
 
 ## Plugin Info
 - **Name:** StackingElectricFurnace
-- **Version:** 1.2.1
+- **Version:** 1.2.2
 - **Permission:** `stackingelectricfurnace.use`
 - **Config:** `oxide/config/StackingElectricFurnace.json`
 - **Data:** `oxide/data/StackingElectricFurnace.json`
