@@ -1,3 +1,7 @@
+<img width="2175" height="1283" alt="image" src="https://github.com/user-attachments/assets/02bf974b-d278-43c7-acd1-02b2f29e9b44" />
+
+
+
 # StackingElectricFurnace
 
 Allows players to stack **electric furnaces** and **industrial electric furnaces** up to **2 total furnaces**.
